@@ -60,7 +60,7 @@ app.post('/analyze', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 1500,
+        max_tokens: 4000,
         system: system,
         messages: messages
       })
