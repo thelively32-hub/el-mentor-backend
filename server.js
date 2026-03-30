@@ -171,123 +171,112 @@ app.post('/transcribe', verifyToken, async (req, res) => {
 });
 
 // ── YOUTUBE TRANSCRIPT ──
+// ── YOUTUBE TRANSCRIPT (yt-dlp + Whisper fallback) ──
+const ytdlp = require('yt-dlp-exec');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const ytCache = new Map();
+
 app.post('/youtube', verifyToken, async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ message: 'Missing URL' });
+
   const match = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   if (!match) return res.status(400).json({ message: 'Invalid YouTube URL' });
   const videoId = match[1];
 
-  try {
-    let transcript = '', title = '';
+  // Check cache first
+  if (ytCache.has(videoId)) {
+    console.log('YouTube cache hit:', videoId);
+    return res.json(ytCache.get(videoId));
+  }
 
-    // Step 1: Get page HTML to extract title and caption tracks
+  let transcript = '', title = '';
+
+  // ── METHOD 1: Try captions from page HTML ──
+  try {
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Cookie': 'CONSENT=YES+; SOCS=CAESEwgDEgk2NTg5NjM4OTIaAmVuIAEaBgiA_LysBg=='
     };
 
-    console.log('Fetching YouTube page for videoId:', videoId);
     const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers });
-    console.log('Page response status:', pageRes.status, pageRes.statusText);
     const html = await pageRes.text();
-    console.log('HTML length:', html.length);
-    console.log('Has ytInitialPlayerResponse:', html.includes('ytInitialPlayerResponse'));
-    console.log('Has captionTracks:', html.includes('captionTracks'));
 
     // Extract title
     const titleMatch = html.match(/"title":"([^"]+)"/);
-    if (titleMatch) title = titleMatch[1].replace(/\\u0026/g, '&').replace(/\\"/g, '"');
+    if (titleMatch) title = titleMatch[1].replace(/\u0026/g, '&');
 
-    // Method 1: Extract caption URL from ytInitialPlayerResponse
-    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) ||
-                        html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
-
+    // Extract captions from ytInitialPlayerResponse
+    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
     if (playerMatch) {
-      try {
-        const player = JSON.parse(playerMatch[1]);
-        const captions = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-        if (captions && captions.length > 0) {
-          // Prefer English, then any available
-          const track = captions.find(t => t.languageCode === 'en') ||
-                        captions.find(t => t.languageCode === 'es') ||
-                        captions[0];
-
-          if (track?.baseUrl) {
-            const capUrl = track.baseUrl + '&fmt=json3';
-            const capRes = await fetch(capUrl, { headers });
-            const capData = await capRes.json();
-
-            if (capData.events?.length > 0) {
-              transcript = capData.events
-                .filter(e => e.segs)
-                .map(e => e.segs.map(s => s.utf8 || '').join(''))
-                .join(' ')
-                .replace(/\s+/g, ' ')
-                .replace(/\n/g, ' ')
-                .trim();
-            }
-          }
-        }
-      } catch(e) {
-        console.error('Player parse error:', e.message);
-      }
-    }
-
-    // Method 2: Fallback to timedtext API with more languages
-    if (!transcript) {
-      for (const lang of ['en', 'es', 'a.en', 'a.es', 'en-US', 'en-GB']) {
-        try {
-          const r = await fetch(
-            `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${lang}&fmt=json3`,
-            { headers }
-          );
-          if (!r.ok) continue;
-          const d = await r.json();
-          if (d.events?.length > 0) {
-            transcript = d.events
+      const player = JSON.parse(playerMatch[1]);
+      const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (tracks?.length > 0) {
+        const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
+                      tracks.find(t => t.languageCode?.startsWith('es')) ||
+                      tracks[0];
+        if (track?.baseUrl) {
+          const capRes = await fetch(track.baseUrl + '&fmt=json3', { headers });
+          const capData = await capRes.json();
+          if (capData.events?.length > 0) {
+            transcript = capData.events
               .filter(e => e.segs)
               .map(e => e.segs.map(s => s.utf8 || '').join(''))
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (transcript) break;
+              .join(' ').replace(/\s+/g, ' ').trim();
           }
-        } catch(e) { continue; }
+        }
       }
     }
-
-    if (!transcript) {
-      return res.status(404).json({
-        message: 'No captions found. Make sure the video has subtitles enabled and is publicly accessible.'
-      });
-    }
-
-    // Limit transcript length to avoid token overflow
-    if (transcript.length > 15000) {
-      transcript = transcript.substring(0, 15000) + '... [transcript truncated]';
-    }
-
-    res.json({ transcript, title, videoId });
-
-  } catch (err) {
-    console.error('YouTube error:', err);
-    res.status(500).json({ message: 'Error fetching YouTube transcript', detail: err.message });
+  } catch(e) {
+    console.log('Caption method failed:', e.message);
   }
+
+  // ── METHOD 2: yt-dlp + Whisper if no captions ──
+  if (!transcript && OPENAI_API_KEY) {
+    const tmpFile = path.join(os.tmpdir(), `yt_${videoId}.mp3`);
+    try {
+      console.log('Downloading audio with yt-dlp:', videoId);
+      await ytdlp(`https://www.youtube.com/watch?v=${videoId}`, {
+        extractAudio: true,
+        audioFormat: 'mp3',
+        audioQuality: '64K',
+        output: tmpFile,
+        noPlaylist: true,
+        matchFilter: 'duration < 3600', // max 1 hour
+      });
+
+      console.log('Transcribing with Whisper...');
+      const { default: OpenAI } = await import('openai');
+      const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+      const response = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(tmpFile),
+        model: 'whisper-1',
+      });
+      transcript = response.text;
+      console.log('Whisper transcription done, length:', transcript.length);
+    } catch(e) {
+      console.error('yt-dlp/Whisper error:', e.message);
+    } finally {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    }
+  }
+
+  if (!transcript) {
+    return res.status(404).json({
+      message: 'Could not get transcript. The video may be private, age-restricted, or have no audio.'
+    });
+  }
+
+  // Trim if too long
+  if (transcript.length > 15000) transcript = transcript.substring(0, 15000) + '... [truncated]';
+
+  const result = { transcript, title, videoId, source: 'captions' };
+  ytCache.set(videoId, result);
+  res.json(result);
 });
 
 
