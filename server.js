@@ -177,28 +177,102 @@ app.post('/youtube', verifyToken, async (req, res) => {
   const match = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   if (!match) return res.status(400).json({ message: 'Invalid YouTube URL' });
   const videoId = match[1];
+
   try {
     let transcript = '', title = '';
-    try {
-      const html = await (await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers: { 'User-Agent': 'Mozilla/5.0' } })).text();
-      const m = html.match(/<title>(.+?)\s*-\s*YouTube<\/title>/);
-      if (m) title = m[1];
-    } catch(e) {}
-    for (const lang of ['en', 'es', 'a.en', 'a.es']) {
-      if (transcript) break;
+
+    // Step 1: Get page HTML to extract title and caption tracks
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    };
+
+    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers });
+    const html = await pageRes.text();
+
+    // Extract title
+    const titleMatch = html.match(/"title":"([^"]+)"/);
+    if (titleMatch) title = titleMatch[1].replace(/\\u0026/g, '&').replace(/\\"/g, '"');
+
+    // Method 1: Extract caption URL from ytInitialPlayerResponse
+    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) ||
+                        html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
+
+    if (playerMatch) {
       try {
-        const r = await fetch(`https://www.youtube.com/api/timedtext?v=${videoId}&lang=${lang}&fmt=json3`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        if (!r.ok) continue;
-        const d = await r.json();
-        if (d.events?.length > 0) transcript = d.events.filter(e => e.segs).map(e => e.segs.map(s => s.utf8||'').join('')).join(' ').replace(/\s+/g,' ').trim();
-      } catch(e) { continue; }
+        const player = JSON.parse(playerMatch[1]);
+        const captions = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+        if (captions && captions.length > 0) {
+          // Prefer English, then any available
+          const track = captions.find(t => t.languageCode === 'en') ||
+                        captions.find(t => t.languageCode === 'es') ||
+                        captions[0];
+
+          if (track?.baseUrl) {
+            const capUrl = track.baseUrl + '&fmt=json3';
+            const capRes = await fetch(capUrl, { headers });
+            const capData = await capRes.json();
+
+            if (capData.events?.length > 0) {
+              transcript = capData.events
+                .filter(e => e.segs)
+                .map(e => e.segs.map(s => s.utf8 || '').join(''))
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .replace(/\n/g, ' ')
+                .trim();
+            }
+          }
+        }
+      } catch(e) {
+        console.error('Player parse error:', e.message);
+      }
     }
-    if (!transcript) return res.status(404).json({ message: 'No captions found for this video.' });
+
+    // Method 2: Fallback to timedtext API with more languages
+    if (!transcript) {
+      for (const lang of ['en', 'es', 'a.en', 'a.es', 'en-US', 'en-GB']) {
+        try {
+          const r = await fetch(
+            `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${lang}&fmt=json3`,
+            { headers }
+          );
+          if (!r.ok) continue;
+          const d = await r.json();
+          if (d.events?.length > 0) {
+            transcript = d.events
+              .filter(e => e.segs)
+              .map(e => e.segs.map(s => s.utf8 || '').join(''))
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (transcript) break;
+          }
+        } catch(e) { continue; }
+      }
+    }
+
+    if (!transcript) {
+      return res.status(404).json({
+        message: 'No captions found. Make sure the video has subtitles enabled and is publicly accessible.'
+      });
+    }
+
+    // Limit transcript length to avoid token overflow
+    if (transcript.length > 15000) {
+      transcript = transcript.substring(0, 15000) + '... [transcript truncated]';
+    }
+
     res.json({ transcript, title, videoId });
+
   } catch (err) {
-    res.status(500).json({ message: 'YouTube error', detail: err.message });
+    console.error('YouTube error:', err);
+    res.status(500).json({ message: 'Error fetching YouTube transcript', detail: err.message });
   }
 });
+
 
 // ── GLOBAL ERROR HANDLER ──
 app.use((err, req, res, next) => {
