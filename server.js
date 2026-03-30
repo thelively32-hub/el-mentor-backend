@@ -171,8 +171,7 @@ app.post('/transcribe', verifyToken, async (req, res) => {
 });
 
 // ── YOUTUBE TRANSCRIPT ──
-// ── YOUTUBE TRANSCRIPT (yt-dlp + Whisper fallback) ──
-const ytdlp = require('yt-dlp-exec');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -186,99 +185,112 @@ app.post('/youtube', verifyToken, async (req, res) => {
   if (!match) return res.status(400).json({ message: 'Invalid YouTube URL' });
   const videoId = match[1];
 
-  // Check cache first
   if (ytCache.has(videoId)) {
-    console.log('YouTube cache hit:', videoId);
     return res.json(ytCache.get(videoId));
   }
 
-  let transcript = '', title = '';
+  const tmpDir = os.tmpdir();
+  const outBase = path.join(tmpDir, `yt_${videoId}`);
 
-  // ── METHOD 1: Try captions from page HTML ──
   try {
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Cookie': 'CONSENT=YES+; SOCS=CAESEwgDEgk2NTg5NjM4OTIaAmVuIAEaBgiA_LysBg=='
-    };
+    console.log('Getting subtitles with yt-dlp for:', videoId);
 
-    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers });
-    const html = await pageRes.text();
-
-    // Extract title
-    const titleMatch = html.match(/"title":"([^"]+)"/);
-    if (titleMatch) title = titleMatch[1].replace(/\u0026/g, '&');
-
-    // Extract captions from ytInitialPlayerResponse
-    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
-    if (playerMatch) {
-      const player = JSON.parse(playerMatch[1]);
-      const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tracks?.length > 0) {
-        const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
-                      tracks.find(t => t.languageCode?.startsWith('es')) ||
-                      tracks[0];
-        if (track?.baseUrl) {
-          const capRes = await fetch(track.baseUrl + '&fmt=json3', { headers });
-          const capData = await capRes.json();
-          if (capData.events?.length > 0) {
-            transcript = capData.events
-              .filter(e => e.segs)
-              .map(e => e.segs.map(s => s.utf8 || '').join(''))
-              .join(' ').replace(/\s+/g, ' ').trim();
-          }
+    const transcript = await new Promise((resolve, reject) => {
+      execFile('yt-dlp', [
+        `https://www.youtube.com/watch?v=${videoId}`,
+        '--write-auto-subs',
+        '--write-subs',
+        '--sub-langs', 'en,es,en-US,en-GB',
+        '--sub-format', 'vtt',
+        '--skip-download',
+        '--output', outBase,
+        '--no-playlist',
+        '--quiet'
+      ], { timeout: 30000 }, (err, stdout, stderr) => {
+        if (err) {
+          console.error('yt-dlp error:', err.message);
+          reject(err);
+          return;
         }
-      }
-    }
-  } catch(e) {
-    console.log('Caption method failed:', e.message);
-  }
 
-  // ── METHOD 2: yt-dlp + Whisper if no captions ──
-  if (!transcript && OPENAI_API_KEY) {
-    const tmpFile = path.join(os.tmpdir(), `yt_${videoId}.mp3`);
+        const files = fs.readdirSync(tmpDir).filter(f =>
+          f.startsWith(`yt_${videoId}`) && f.endsWith('.vtt')
+        );
+
+        if (files.length === 0) {
+          reject(new Error('No subtitle file generated'));
+          return;
+        }
+
+        const vttContent = fs.readFileSync(path.join(tmpDir, files[0]), 'utf8');
+
+        // Clean up files
+        files.forEach(f => {
+          try { fs.unlinkSync(path.join(tmpDir, f)); } catch(e) {}
+        });
+
+        // Parse VTT to plain text
+        const text = vttContent
+          .split('\n')
+          .filter(line =>
+            line.trim() &&
+            !line.startsWith('WEBVTT') &&
+            !line.startsWith('NOTE') &&
+            !line.match(/^\d{2}:\d{2}/) &&
+            !line.match(/^\d+$/) &&
+            !line.includes('-->') &&
+            !line.startsWith('Kind:') &&
+            !line.startsWith('Language:')
+          )
+          .map(line => line.replace(/<[^>]+>/g, '').trim())
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        // Remove duplicate consecutive phrases (common in auto-subs) — fixed algorithm
+        const cleaned = text
+          .replace(/(\b[\w\s]{10,60})\s+\1/gi, '$1')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        resolve(cleaned);
+      });
+    });
+
+    if (!transcript || transcript.length < 50) {
+      return res.status(404).json({ message: 'No subtitles found for this video.' });
+    }
+
+    // Get title
+    let title = '';
     try {
-      console.log('Downloading audio with yt-dlp:', videoId);
-      await ytdlp(`https://www.youtube.com/watch?v=${videoId}`, {
-        extractAudio: true,
-        audioFormat: 'mp3',
-        audioQuality: '64K',
-        output: tmpFile,
-        noPlaylist: true,
-        matchFilter: 'duration < 3600', // max 1 hour
+      const titleResult = await new Promise((resolve) => {
+        execFile('yt-dlp', [
+          `https://www.youtube.com/watch?v=${videoId}`,
+          '--get-title', '--no-playlist', '--quiet'
+        ], { timeout: 10000 }, (err, stdout) => {
+          resolve(err ? '' : stdout.trim());
+        });
       });
+      title = titleResult;
+    } catch(e) {}
 
-      console.log('Transcribing with Whisper...');
-      const { default: OpenAI } = await import('openai');
-      const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-      const response = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(tmpFile),
-        model: 'whisper-1',
-      });
-      transcript = response.text;
-      console.log('Whisper transcription done, length:', transcript.length);
-    } catch(e) {
-      console.error('yt-dlp/Whisper error:', e.message);
-    } finally {
-      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-    }
-  }
+    const finalText = transcript.length > 15000
+      ? transcript.substring(0, 15000) + '... [truncated]'
+      : transcript;
 
-  if (!transcript) {
-    return res.status(404).json({
-      message: 'Could not get transcript. The video may be private, age-restricted, or have no audio.'
+    const result = { transcript: finalText, title, videoId };
+    ytCache.set(videoId, result);
+    res.json(result);
+
+  } catch (err) {
+    console.error('YouTube transcript error:', err.message);
+    res.status(404).json({
+      message: 'Could not get subtitles. Make sure the video is public and has subtitles available.'
     });
   }
-
-  // Trim if too long
-  if (transcript.length > 15000) transcript = transcript.substring(0, 15000) + '... [truncated]';
-
-  const result = { transcript, title, videoId, source: 'captions' };
-  ytCache.set(videoId, result);
-  res.json(result);
 });
-
 
 // ── GLOBAL ERROR HANDLER ──
 app.use((err, req, res, next) => {
