@@ -188,8 +188,13 @@ app.post('/youtube', verifyToken, async (req, res) => {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
     };
 
+    console.log('Fetching YouTube page for videoId:', videoId);
     const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers });
+    console.log('Page response status:', pageRes.status, pageRes.statusText);
     const html = await pageRes.text();
+    console.log('HTML length:', html.length);
+    console.log('Has ytInitialPlayerResponse:', html.includes('ytInitialPlayerResponse'));
+    console.log('Has captionTracks:', html.includes('captionTracks'));
 
     // Extract title
     const titleMatch = html.match(/"title":"([^"]+)"/);
