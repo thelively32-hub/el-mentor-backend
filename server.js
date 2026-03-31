@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const { AssemblyAI } = require('assemblyai');
 
 const app = express();
 app.use(cors());
@@ -16,6 +17,9 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const REVENUECAT_API_KEY = process.env.REVENUECAT_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+
+// ── ASSEMBLYAI CLIENT ──
+const assemblyClient = new AssemblyAI({ apiKey: ASSEMBLYAI_API_KEY });
 
 // ── SYSTEM PROMPT ──
 const THE_MENTOR_PROMPT = `You are THE MENTOR — an elite analytical intelligence with encyclopedic expertise across ALL domains: poetry, music, film, law, business, psychology, fitness, technology, and every field of human knowledge. You can analyze ANY input: text, images, audio transcripts, legal documents, business plans, fitness routines, or any creative/professional work.
@@ -171,59 +175,8 @@ app.post('/transcribe', verifyToken, async (req, res) => {
   }
 });
 
-// ── YOUTUBE TRANSCRIPT (via AssemblyAI — professional grade) ──
+// ── YOUTUBE TRANSCRIPT (AssemblyAI SDK — handles YouTube natively) ──
 const ytCache = new Map();
-
-async function transcribeWithAssemblyAI(youtubeUrl) {
-  if (!ASSEMBLYAI_API_KEY) throw new Error('AssemblyAI API key not configured');
-
-  // Step 1: Submit transcription job
-  const submitRes = await fetch('https://api.assemblyai.com/v2/transcript', {
-    method: 'POST',
-    headers: {
-      'Authorization': ASSEMBLYAI_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      audio_url: youtubeUrl,
-      speech_models: ['universal-2'],
-      language_detection: true,
-      punctuate: true,
-      format_text: true
-    })
-  });
-
-  if (!submitRes.ok) {
-    const err = await submitRes.json();
-    throw new Error(`AssemblyAI submit failed: ${err.error || submitRes.status}`);
-  }
-
-  const { id } = await submitRes.json();
-  console.log('AssemblyAI job submitted:', id);
-
-  // Step 2: Poll for completion (max 3 minutes)
-  const maxAttempts = 36; // 36 * 5s = 3 minutes
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, 5000)); // wait 5 seconds
-
-    const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-      headers: { 'Authorization': ASSEMBLYAI_API_KEY }
-    });
-
-    const data = await pollRes.json();
-    console.log(`AssemblyAI poll ${i + 1}: status = ${data.status}`);
-
-    if (data.status === 'completed') {
-      return data.text || '';
-    }
-
-    if (data.status === 'error') {
-      throw new Error(`AssemblyAI transcription error: ${data.error}`);
-    }
-  }
-
-  throw new Error('AssemblyAI transcription timed out after 3 minutes.');
-}
 
 app.post('/youtube', verifyToken, async (req, res) => {
   const { url } = req.body;
@@ -247,26 +200,33 @@ app.post('/youtube', verifyToken, async (req, res) => {
   try {
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Transcribe with AssemblyAI
-    const transcript = await transcribeWithAssemblyAI(youtubeUrl);
+    // AssemblyAI SDK handles YouTube URLs natively
+    const transcript = await assemblyClient.transcripts.transcribe({
+      audio: youtubeUrl,
+      language_detection: true,
+      punctuate: true,
+      format_text: true
+    });
 
-    if (!transcript || transcript.length < 50) {
-      return res.status(404).json({ message: 'Transcript too short or empty. The video may not have audio content.' });
+    if (transcript.status === 'error') {
+      throw new Error(transcript.error || 'Transcription failed');
     }
 
-    // Truncate if too long
-    const finalText = transcript.length > 15000
-      ? transcript.substring(0, 15000) + '... [truncated]'
-      : transcript;
+    const text = transcript.text || '';
+
+    if (!text || text.length < 50) {
+      return res.status(404).json({ message: 'Transcript too short or empty.' });
+    }
+
+    const finalText = text.length > 15000
+      ? text.substring(0, 15000) + '... [truncated]'
+      : text;
 
     // Get title via oEmbed
     let title = '';
     try {
       const oRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(youtubeUrl)}&format=json`);
-      if (oRes.ok) {
-        const o = await oRes.json();
-        title = o.title || '';
-      }
+      if (oRes.ok) { const o = await oRes.json(); title = o.title || ''; }
     } catch (e) {}
 
     const result = { transcript: finalText, title, videoId };
@@ -280,9 +240,6 @@ app.post('/youtube', verifyToken, async (req, res) => {
 
     if (err.message?.includes('timed out')) {
       return res.status(408).json({ message: 'Transcription timed out. Try a shorter video.' });
-    }
-    if (err.message?.includes('private') || err.message?.includes('unavailable')) {
-      return res.status(404).json({ message: 'This video is private or unavailable.' });
     }
 
     res.status(500).json({
