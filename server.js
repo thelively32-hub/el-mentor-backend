@@ -203,7 +203,7 @@ app.post('/youtube', verifyToken, async (req, res) => {
     // AssemblyAI SDK handles YouTube URLs natively
     const transcript = await assemblyClient.transcripts.transcribe({
       audio: youtubeUrl,
-      speech_model: 'universal-2',
+      speech_models: ['universal-2'],
       language_detection: true,
       punctuate: true,
       format_text: true
