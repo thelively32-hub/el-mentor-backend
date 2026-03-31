@@ -84,6 +84,67 @@ async function checkAndIncrementUsage(uid, plan) {
   return { allowed: true, remaining: FREE_LIMIT - data.dailyCount - 1 };
 }
 
+// ── AUTO-CLEANUP: Delete analyses older than 30 days for free users ──
+async function cleanupFreeUserHistory() {
+  try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    const cutoffTs = admin.firestore.Timestamp.fromDate(cutoff);
+
+    console.log('[cleanup] Running free user history cleanup, cutoff:', cutoff.toISOString());
+
+    // Get all pro user IDs first
+    const proSnap = await db.collection('users').where('plan', '==', 'pro').get();
+    const proUids = new Set(proSnap.docs.map(d => d.id));
+
+    // Get analyses older than 30 days
+    const oldSnap = await db.collection('analisis')
+      .where('createdAt', '<', cutoffTs)
+      .limit(500) // batch limit
+      .get();
+
+    if (oldSnap.empty) {
+      console.log('[cleanup] No old analyses found.');
+      return { deleted: 0 };
+    }
+
+    let deleted = 0;
+    const batch = db.batch();
+
+    oldSnap.docs.forEach(doc => {
+      const userId = doc.data().userId;
+      // Only delete if user is NOT pro
+      if (!proUids.has(userId)) {
+        batch.delete(doc.ref);
+        deleted++;
+      }
+    });
+
+    if (deleted > 0) {
+      await batch.commit();
+      console.log(`[cleanup] Deleted ${deleted} old analyses from free users.`);
+    }
+
+    return { deleted };
+  } catch (err) {
+    console.error('[cleanup] Error:', err.message);
+    return { deleted: 0, error: err.message };
+  }
+}
+
+// ── AUTO-CLEANUP SCHEDULER: runs every 24 hours ──
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+setInterval(() => {
+  console.log('[cleanup] Scheduled cleanup triggered');
+  cleanupFreeUserHistory();
+}, CLEANUP_INTERVAL_MS);
+
+// Run once on startup (after 5 min delay to let server settle)
+setTimeout(() => {
+  console.log('[cleanup] Initial cleanup on startup');
+  cleanupFreeUserHistory();
+}, 5 * 60 * 1000);
+
 // ── TEST ──
 app.get('/', (req, res) => res.json({ status: 'ok', message: 'The Mentor Backend 🔥' }));
 
