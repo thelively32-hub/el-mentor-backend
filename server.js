@@ -170,8 +170,7 @@ app.post('/transcribe', verifyToken, async (req, res) => {
   }
 });
 
-// ── YOUTUBE TRANSCRIPT (via youtube-transcript — no yt-dlp, no IP blocks) ──
-const { YoutubeTranscript } = require('youtube-transcript');
+// ── YOUTUBE TRANSCRIPT (dynamic import to handle ESM) ──
 const ytCache = new Map();
 
 app.post('/youtube', verifyToken, async (req, res) => {
@@ -190,7 +189,9 @@ app.post('/youtube', verifyToken, async (req, res) => {
   try {
     console.log('Fetching transcript for:', videoId);
 
-    // Try English first, then Spanish, then any available
+    // Dynamic import handles both ESM and CommonJS versions
+    const { YoutubeTranscript } = await import('youtube-transcript');
+
     let transcriptItems = null;
     const langs = ['en', 'es', 'en-US', 'en-GB'];
 
@@ -204,8 +205,8 @@ app.post('/youtube', verifyToken, async (req, res) => {
       }
     }
 
-    // If no specific lang worked, try without lang preference
-    if (!transcriptItems) {
+    // Fallback: try without lang preference
+    if (!transcriptItems || transcriptItems.length === 0) {
       transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
     }
 
@@ -213,16 +214,16 @@ app.post('/youtube', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'No subtitles found for this video. Make sure it has captions enabled.' });
     }
 
-    // Convert transcript items to clean text
+    // Convert to clean text
     const rawText = transcriptItems
       .map(item => item.text.trim())
       .filter(Boolean)
       .join(' ')
       .replace(/\s+/g, ' ')
-      .replace(/\[.*?\]/g, '') // remove [Music], [Applause] etc
+      .replace(/\[.*?\]/g, '')
       .trim();
 
-    // Remove duplicate consecutive phrases (auto-caption artifact)
+    // Remove duplicate consecutive phrases
     const cleaned = rawText
       .replace(/(\b[\w\s]{10,60})\s+\1/gi, '$1')
       .replace(/\s+/g, ' ')
@@ -236,7 +237,7 @@ app.post('/youtube', verifyToken, async (req, res) => {
       ? cleaned.substring(0, 15000) + '... [truncated]'
       : cleaned;
 
-    // Get video title via oEmbed (no API key needed)
+    // Get title via oEmbed (no API key needed)
     let title = '';
     try {
       const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
@@ -244,14 +245,12 @@ app.post('/youtube', verifyToken, async (req, res) => {
         const oembedData = await oembedRes.json();
         title = oembedData.title || '';
       }
-    } catch (e) {
-      console.log('Could not fetch title via oEmbed');
-    }
+    } catch (e) {}
 
     const result = { transcript: finalText, title, videoId };
     ytCache.set(videoId, result);
 
-    console.log(`Transcript fetched: ${finalText.length} chars, title: "${title}"`);
+    console.log(`Transcript OK: ${finalText.length} chars, title: "${title}"`);
     res.json(result);
 
   } catch (err) {
