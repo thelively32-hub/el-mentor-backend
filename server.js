@@ -186,7 +186,7 @@ async function transcribeWithAssemblyAI(youtubeUrl) {
     },
     body: JSON.stringify({
       audio_url: youtubeUrl,
-      speech_model: 'universal-2',
+      speech_models: ['universal-2'],
       language_detection: true,
       punctuate: true,
       format_text: true
