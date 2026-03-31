@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
-const { AssemblyAI } = require('assemblyai');
 
 const app = express();
 app.use(cors());
@@ -16,10 +15,7 @@ const db = admin.firestore();
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const REVENUECAT_API_KEY = process.env.REVENUECAT_API_KEY;
-const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
-
-// ── ASSEMBLYAI CLIENT ──
-const assemblyClient = new AssemblyAI({ apiKey: ASSEMBLYAI_API_KEY });
+const SUPADATA_API_KEY = process.env.SUPADATA_API_KEY;
 
 // ── SYSTEM PROMPT ──
 const THE_MENTOR_PROMPT = `You are THE MENTOR — an elite analytical intelligence with encyclopedic expertise across ALL domains: poetry, music, film, law, business, psychology, fitness, technology, and every field of human knowledge. You can analyze ANY input: text, images, audio transcripts, legal documents, business plans, fitness routines, or any creative/professional work.
@@ -175,7 +171,96 @@ app.post('/transcribe', verifyToken, async (req, res) => {
   }
 });
 
-// ── YOUTUBE TRANSCRIPT (AssemblyAI SDK — handles YouTube natively) ──
+// ── YOUTUBE HELPERS ──
+
+// STRATEGY 1: Free captions via timedtext (works for videos with public subtitles)
+async function getFreeCaptions(videoId) {
+  const langs = ['en', 'es', 'en-US', 'en-GB'];
+  for (const lang of langs) {
+    try {
+      const url = `https://www.youtube.com/api/timedtext?lang=${lang}&v=${videoId}&fmt=json3`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data.events || data.events.length === 0) continue;
+
+      const text = data.events
+        .filter(e => e.segs)
+        .map(e => e.segs.map(s => s.utf8 || '').join(''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (text.length > 100) {
+        console.log(`Free captions OK (${lang}): ${text.length} chars`);
+        return text;
+      }
+    } catch (e) {
+      console.log(`timedtext ${lang} failed:`, e.message);
+    }
+  }
+
+  // Try auto-generated captions
+  try {
+    const url = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&kind=asr&fmt=json3`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.events && data.events.length > 0) {
+        const text = data.events
+          .filter(e => e.segs)
+          .map(e => e.segs.map(s => s.utf8 || '').join(''))
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text.length > 100) {
+          console.log(`Free auto-captions OK: ${text.length} chars`);
+          return text;
+        }
+      }
+    }
+  } catch (e) {}
+
+  throw new Error('No free captions available');
+}
+
+// STRATEGY 2: Supadata (paid fallback — only when free captions unavailable)
+async function getSupadataTranscript(videoId) {
+  if (!SUPADATA_API_KEY) throw new Error('Supadata API key not configured');
+
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  console.log('Using Supadata for:', videoId);
+
+  const res = await fetch('https://api.supadata.ai/v1/youtube/transcript', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SUPADATA_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ url: youtubeUrl })
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || `Supadata error ${res.status}`);
+  }
+
+  const data = await res.json();
+  const text = data.content || data.transcript || data.text || '';
+
+  if (!text || text.length < 50) {
+    throw new Error('Supadata returned empty transcript');
+  }
+
+  console.log(`Supadata OK: ${text.length} chars`);
+  return text;
+}
+
+// ── YOUTUBE TRANSCRIPT ENDPOINT (hybrid: free first → Supadata fallback) ──
 const ytCache = new Map();
 
 app.post('/youtube', verifyToken, async (req, res) => {
@@ -187,67 +272,60 @@ app.post('/youtube', verifyToken, async (req, res) => {
   const videoId = match[1];
 
   if (ytCache.has(videoId)) {
-    console.log('YouTube cache hit:', videoId);
+    console.log('Cache hit:', videoId);
     return res.json(ytCache.get(videoId));
   }
 
-  if (!ASSEMBLYAI_API_KEY) {
-    return res.status(500).json({ message: 'AssemblyAI API key not configured' });
-  }
+  console.log('Processing YouTube video:', videoId);
 
-  console.log('Transcribing YouTube video:', videoId);
+  let transcript = '';
+  let source = '';
 
+  // STRATEGY 1: Free captions
   try {
-    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    transcript = await getFreeCaptions(videoId);
+    source = 'captions';
+  } catch (e) {
+    console.log('Free captions failed, trying Supadata...');
 
-    // AssemblyAI SDK handles YouTube URLs natively
-    const transcript = await assemblyClient.transcripts.transcribe({
-      audio: youtubeUrl,
-      speech_models: ['universal-2'],
-      language_detection: true,
-      punctuate: true,
-      format_text: true
-    });
-
-    if (transcript.status === 'error') {
-      throw new Error(transcript.error || 'Transcription failed');
-    }
-
-    const text = transcript.text || '';
-
-    if (!text || text.length < 50) {
-      return res.status(404).json({ message: 'Transcript too short or empty.' });
-    }
-
-    const finalText = text.length > 15000
-      ? text.substring(0, 15000) + '... [truncated]'
-      : text;
-
-    // Get title via oEmbed
-    let title = '';
+    // STRATEGY 2: Supadata (paid)
     try {
-      const oRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(youtubeUrl)}&format=json`);
-      if (oRes.ok) { const o = await oRes.json(); title = o.title || ''; }
-    } catch (e) {}
-
-    const result = { transcript: finalText, title, videoId };
-    ytCache.set(videoId, result);
-
-    console.log(`Transcript ready: ${finalText.length} chars, title: "${title}"`);
-    res.json(result);
-
-  } catch (err) {
-    console.error('YouTube transcription error:', err.message);
-
-    if (err.message?.includes('timed out')) {
-      return res.status(408).json({ message: 'Transcription timed out. Try a shorter video.' });
+      transcript = await getSupadataTranscript(videoId);
+      source = 'supadata';
+    } catch (e2) {
+      console.error('Both strategies failed:', e2.message);
+      return res.status(404).json({
+        message: 'Could not get transcript. The video may not have captions or may be restricted.'
+      });
     }
-
-    res.status(500).json({
-      message: 'Could not transcribe video. Make sure it is public and has audio.',
-      detail: err.message
-    });
   }
+
+  // Clean up transcript
+  const cleaned = transcript
+    .replace(/\[.*?\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (cleaned.length < 50) {
+    return res.status(404).json({ message: 'Transcript too short or empty.' });
+  }
+
+  const finalText = cleaned.length > 15000
+    ? cleaned.substring(0, 15000) + '... [truncated]'
+    : cleaned;
+
+  // Get title via oEmbed
+  let title = '';
+  try {
+    const oRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+    if (oRes.ok) { const o = await oRes.json(); title = o.title || ''; }
+  } catch (e) {}
+
+  const result = { transcript: finalText, title, videoId, source };
+  ytCache.set(videoId, result);
+
+  console.log(`Done [${source}]: ${finalText.length} chars, title: "${title}"`);
+  res.json(result);
 });
 
 // ── GLOBAL ERROR HANDLER ──
