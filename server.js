@@ -235,14 +235,13 @@ async function getSupadataTranscript(videoId) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
   console.log('Using Supadata for:', videoId);
 
-  const res = await fetch('https://api.supadata.ai/v1/youtube/transcript', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SUPADATA_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ url: youtubeUrl })
-  });
+  const res = await fetch(`https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + videoId)}&text=true`, {
+  method: 'GET',
+  headers: {
+    'x-api-key': SUPADATA_API_KEY
+  }
+});
+   
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
