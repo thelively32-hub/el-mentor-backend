@@ -170,11 +170,8 @@ app.post('/transcribe', verifyToken, async (req, res) => {
   }
 });
 
-// ── YOUTUBE TRANSCRIPT ──
-const { execFile } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+// ── YOUTUBE TRANSCRIPT (via youtube-transcript — no yt-dlp, no IP blocks) ──
+const { YoutubeTranscript } = require('youtube-transcript');
 const ytCache = new Map();
 
 app.post('/youtube', verifyToken, async (req, res) => {
@@ -186,108 +183,89 @@ app.post('/youtube', verifyToken, async (req, res) => {
   const videoId = match[1];
 
   if (ytCache.has(videoId)) {
+    console.log('YouTube cache hit:', videoId);
     return res.json(ytCache.get(videoId));
   }
 
-  const tmpDir = os.tmpdir();
-  const outBase = path.join(tmpDir, `yt_${videoId}`);
-
   try {
-    console.log('Getting subtitles with yt-dlp for:', videoId);
+    console.log('Fetching transcript for:', videoId);
 
-    const transcript = await new Promise((resolve, reject) => {
-      execFile('yt-dlp', [
-        `https://www.youtube.com/watch?v=${videoId}`,
-        '--write-auto-subs',
-        '--write-subs',
-        '--sub-langs', 'en,es,en-US,en-GB',
-        '--sub-format', 'vtt',
-        '--skip-download',
-        '--output', outBase,
-        '--no-playlist',
-        '--quiet'
-      ], { timeout: 30000 }, (err, stdout, stderr) => {
-        if (err) {
-          console.error('yt-dlp error:', err.message);
-          reject(err);
-          return;
-        }
+    // Try English first, then Spanish, then any available
+    let transcriptItems = null;
+    const langs = ['en', 'es', 'en-US', 'en-GB'];
 
-        const files = fs.readdirSync(tmpDir).filter(f =>
-          f.startsWith(`yt_${videoId}`) && f.endsWith('.vtt')
-        );
-
-        if (files.length === 0) {
-          reject(new Error('No subtitle file generated'));
-          return;
-        }
-
-        const vttContent = fs.readFileSync(path.join(tmpDir, files[0]), 'utf8');
-
-        // Clean up files
-        files.forEach(f => {
-          try { fs.unlinkSync(path.join(tmpDir, f)); } catch(e) {}
-        });
-
-        // Parse VTT to plain text
-        const text = vttContent
-          .split('\n')
-          .filter(line =>
-            line.trim() &&
-            !line.startsWith('WEBVTT') &&
-            !line.startsWith('NOTE') &&
-            !line.match(/^\d{2}:\d{2}/) &&
-            !line.match(/^\d+$/) &&
-            !line.includes('-->') &&
-            !line.startsWith('Kind:') &&
-            !line.startsWith('Language:')
-          )
-          .map(line => line.replace(/<[^>]+>/g, '').trim())
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        // Remove duplicate consecutive phrases (common in auto-subs) — fixed algorithm
-        const cleaned = text
-          .replace(/(\b[\w\s]{10,60})\s+\1/gi, '$1')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        resolve(cleaned);
-      });
-    });
-
-    if (!transcript || transcript.length < 50) {
-      return res.status(404).json({ message: 'No subtitles found for this video.' });
+    for (const lang of langs) {
+      try {
+        transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang });
+        console.log(`Got transcript in lang: ${lang}`);
+        break;
+      } catch (e) {
+        console.log(`No transcript in ${lang}, trying next...`);
+      }
     }
 
-    // Get title
+    // If no specific lang worked, try without lang preference
+    if (!transcriptItems) {
+      transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+    }
+
+    if (!transcriptItems || transcriptItems.length === 0) {
+      return res.status(404).json({ message: 'No subtitles found for this video. Make sure it has captions enabled.' });
+    }
+
+    // Convert transcript items to clean text
+    const rawText = transcriptItems
+      .map(item => item.text.trim())
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .replace(/\[.*?\]/g, '') // remove [Music], [Applause] etc
+      .trim();
+
+    // Remove duplicate consecutive phrases (auto-caption artifact)
+    const cleaned = rawText
+      .replace(/(\b[\w\s]{10,60})\s+\1/gi, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleaned.length < 50) {
+      return res.status(404).json({ message: 'Transcript too short or empty.' });
+    }
+
+    const finalText = cleaned.length > 15000
+      ? cleaned.substring(0, 15000) + '... [truncated]'
+      : cleaned;
+
+    // Get video title via oEmbed (no API key needed)
     let title = '';
     try {
-      const titleResult = await new Promise((resolve) => {
-        execFile('yt-dlp', [
-          `https://www.youtube.com/watch?v=${videoId}`,
-          '--get-title', '--no-playlist', '--quiet'
-        ], { timeout: 10000 }, (err, stdout) => {
-          resolve(err ? '' : stdout.trim());
-        });
-      });
-      title = titleResult;
-    } catch(e) {}
-
-    const finalText = transcript.length > 15000
-      ? transcript.substring(0, 15000) + '... [truncated]'
-      : transcript;
+      const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+      if (oembedRes.ok) {
+        const oembedData = await oembedRes.json();
+        title = oembedData.title || '';
+      }
+    } catch (e) {
+      console.log('Could not fetch title via oEmbed');
+    }
 
     const result = { transcript: finalText, title, videoId };
     ytCache.set(videoId, result);
+
+    console.log(`Transcript fetched: ${finalText.length} chars, title: "${title}"`);
     res.json(result);
 
   } catch (err) {
     console.error('YouTube transcript error:', err.message);
+
+    if (err.message?.includes('disabled') || err.message?.includes('no transcript')) {
+      return res.status(404).json({ message: 'This video does not have captions/subtitles enabled.' });
+    }
+    if (err.message?.includes('private') || err.message?.includes('unavailable')) {
+      return res.status(404).json({ message: 'This video is private or unavailable.' });
+    }
+
     res.status(404).json({
-      message: 'Could not get subtitles. Make sure the video is public and has subtitles available.'
+      message: 'Could not get transcript. Make sure the video is public and has subtitles available.'
     });
   }
 });
