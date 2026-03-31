@@ -48,8 +48,17 @@ For EACH error found, add an entry to the "fact_check" array with:
 If NO factual errors are found, return "fact_check": []
 Be precise — only flag clear, verifiable factual errors, not opinions or interpretations.
 
+CONCISENESS RULES:
+- evaluacion_general: max 3 sentences — verdict + main strength + main weakness
+- elementos[].detalle: max 2 sentences — cite specific elements from the submission
+- elementos[].referente: one historical + one modern, names only with work title
+- interpretacion: max 2 sentences
+- recomendaciones: 3 items, max 2 sentences each
+- contexto_historico.explicacion: max 2 sentences
+- paralelo_moderno.explicacion: max 2 sentences
+
 OUTPUT — STRICT JSON ONLY:
-{"score":<0-100>,"zona":"<level>","tipo_detectado":"<precise type>","contexto_historico":{"referente":"<name + work + year>","explicacion":"<mechanism that made it succeed — 2+ sentences>","comparacion":"<direct comparison to user work>"},"paralelo_moderno":{"referente":"<name/brand + current work>","explicacion":"<why succeeding now — 2+ sentences>","comparacion":"<direct comparison>"},"posicionamiento":"<Level> — <one sentence justification>","proyeccion":"<realistic success path>","evaluacion_general":"<4-5 sentence honest verdict>","elementos":[{"nombre":"<criterion>","impacto":<-25 to 25>,"positivo":<true/false>,"referente":"<HISTORICAL: name+work+mastery> | <MODERN: name+work+relevance>","detalle":"<specific analysis citing actual elements from submission>","recomendacion":"<one concrete immediate action>"}],"interpretacion":"<3-4 sentence honest trajectory assessment>","recomendaciones":["<improvement #1 with real master example>","<improvement #2>","<improvement #3>"],"fact_check":[{"cita":"<exact quote from submitted content>","ubicacion":"<where in the content>","error":"<what is wrong>","correccion":"<correct information>","fuente":"<verifiable source: Author, Title, Year or institution/URL>"}]}`;
+{"score":<0-100>,"zona":"<level>","tipo_detectado":"<precise type>","contexto_historico":{"referente":"<name + work + year>","explicacion":"<2 sentences max>","comparacion":"<1 sentence direct comparison>"},"paralelo_moderno":{"referente":"<name/brand + current work>","explicacion":"<2 sentences max>","comparacion":"<1 sentence direct comparison>"},"posicionamiento":"<Level> — <one sentence>","proyeccion":"<2 sentences max>","evaluacion_general":"<3 sentences max: verdict + strength + weakness>","elementos":[{"nombre":"<criterion>","impacto":<-25 to 25>,"positivo":<true/false>,"referente":"<HISTORICAL: name+work> | <MODERN: name+work>","detalle":"<2 sentences max citing specific elements>","recomendacion":"<one concrete action — 1 sentence>"}],"interpretacion":"<2 sentences max>","recomendaciones":["<improvement #1 — 2 sentences>","<improvement #2 — 2 sentences>","<improvement #3 — 2 sentences>"],"fact_check":[{"cita":"<exact quote>","ubicacion":"<where>","error":"<what is wrong>","correccion":"<correct info>","fuente":"<source>"}]}`;
 
 // ── VERIFY FIREBASE TOKEN ──
 async function verifyToken(req, res, next) {
@@ -178,7 +187,7 @@ app.post('/analyze', verifyToken, async (req, res) => {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 5000, system: THE_MENTOR_PROMPT, messages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 3500, system: THE_MENTOR_PROMPT, messages })
     });
     const data = await response.json();
     if (!response.ok) return res.status(502).json({ message: 'AI error', detail: data });
