@@ -28,37 +28,44 @@ RULE 4: ALL JSON fields required — no empty strings or null values.
 RULE 5: Expert mode — sharp, direct, occasionally ruthless, always constructive.
 RULE 6: Self-correct before sending — validate JSON is perfectly parseable.
 
+LANGUAGE RULE — CRITICAL:
+Detect the language of the submitted content and respond ENTIRELY in that language.
+- If the content is in Spanish → respond in Spanish (all fields, all text)
+- If the content is in English → respond in English
+- If the content is in Portuguese → respond in Portuguese
+- If the content is in French → respond in French
+- Apply this to ANY language — always match the language of the content, not the UI
+- This rule overrides everything — the entire JSON response must be in the content's language
+
 SCORING: 0-25 Weak, 26-40 Below Average, 41-55 Average, 56-70 Emerging, 71-84 Competitive, 85-93 High-Level, 94-100 Exceptional
 
 FACT-CHECKING PROTOCOL:
 While analyzing the submitted content, actively scan for factual errors including:
-- Wrong dates, years, or timelines (e.g. "Einstein was born in 1880" — wrong, it was 1879)
-- Misattributed quotes, inventions, or discoveries (e.g. "Edison invented the telephone" — wrong, it was Bell)
+- Wrong dates, years, or timelines
+- Misattributed quotes, inventions, or discoveries
 - Incorrect statistics or scientific claims
 - Wrong names or titles of works, laws, or events
 - Historical facts stated incorrectly
 
 For EACH error found, add an entry to the "fact_check" array with:
-- "cita": the EXACT phrase or sentence from the submitted content that contains the error (quote it precisely)
-- "ubicacion": where in the content it appears (e.g. "beginning", "middle", "end", "minute 2:30", "paragraph 3")
+- "cita": the EXACT phrase from the content that contains the error
+- "ubicacion": where in the content it appears
 - "error": what specifically is wrong
-- "correccion": the correct information, stated clearly
-- "fuente": a real, verifiable source to confirm the correction (book + author + year, institution, study, or URL)
+- "correccion": the correct information
+- "fuente": a real, verifiable source
 
 If NO factual errors are found, return "fact_check": []
-Be precise — only flag clear, verifiable factual errors, not opinions or interpretations.
 
 CONCISENESS RULES:
-- evaluacion_general: max 3 sentences — verdict + main strength + main weakness
-- elementos[].detalle: max 2 sentences — cite specific elements from the submission
-- elementos[].referente: one historical + one modern, names only with work title
+- evaluacion_general: max 3 sentences
+- elementos[].detalle: max 2 sentences
 - interpretacion: max 2 sentences
 - recomendaciones: 3 items, max 2 sentences each
 - contexto_historico.explicacion: max 2 sentences
 - paralelo_moderno.explicacion: max 2 sentences
 
 OUTPUT — STRICT JSON ONLY:
-{"score":<0-100>,"zona":"<level>","tipo_detectado":"<precise type>","contexto_historico":{"referente":"<name + work + year>","explicacion":"<2 sentences max>","comparacion":"<1 sentence direct comparison>"},"paralelo_moderno":{"referente":"<name/brand + current work>","explicacion":"<2 sentences max>","comparacion":"<1 sentence direct comparison>"},"posicionamiento":"<Level> — <one sentence>","proyeccion":"<2 sentences max>","evaluacion_general":"<3 sentences max: verdict + strength + weakness>","elementos":[{"nombre":"<criterion>","impacto":<-25 to 25>,"positivo":<true/false>,"referente":"<HISTORICAL: name+work> | <MODERN: name+work>","detalle":"<2 sentences max citing specific elements>","recomendacion":"<one concrete action — 1 sentence>"}],"interpretacion":"<2 sentences max>","recomendaciones":["<improvement #1 — 2 sentences>","<improvement #2 — 2 sentences>","<improvement #3 — 2 sentences>"],"fact_check":[{"cita":"<exact quote>","ubicacion":"<where>","error":"<what is wrong>","correccion":"<correct info>","fuente":"<source>"}]}`;
+{"score":<0-100>,"zona":"<level>","tipo_detectado":"<precise type>","contexto_historico":{"referente":"<name + work + year>","explicacion":"<2 sentences max>","comparacion":"<1 sentence>"},"paralelo_moderno":{"referente":"<name/brand + current work>","explicacion":"<2 sentences max>","comparacion":"<1 sentence>"},"posicionamiento":"<Level> — <one sentence>","proyeccion":"<2 sentences max>","evaluacion_general":"<3 sentences max>","elementos":[{"nombre":"<criterion>","impacto":<-25 to 25>,"positivo":<true/false>,"referente":"<HISTORICAL: name+work> | <MODERN: name+work>","detalle":"<2 sentences max>","recomendacion":"<1 sentence>"}],"interpretacion":"<2 sentences max>","recomendaciones":["<#1 — 2 sentences>","<#2 — 2 sentences>","<#3 — 2 sentences>"],"fact_check":[{"cita":"<exact quote>","ubicacion":"<where>","error":"<what is wrong>","correccion":"<correct info>","fuente":"<source>"}]}`;
 
 // ── VERIFY FIREBASE TOKEN ──
 async function verifyToken(req, res, next) {
@@ -99,41 +106,17 @@ async function cleanupFreeUserHistory() {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 30);
     const cutoffTs = admin.firestore.Timestamp.fromDate(cutoff);
-
-    console.log('[cleanup] Running free user history cleanup, cutoff:', cutoff.toISOString());
-
-    // Get all pro user IDs first
+    console.log('[cleanup] Running cleanup, cutoff:', cutoff.toISOString());
     const proSnap = await db.collection('users').where('plan', '==', 'pro').get();
     const proUids = new Set(proSnap.docs.map(d => d.id));
-
-    // Get analyses older than 30 days
-    const oldSnap = await db.collection('analisis')
-      .where('createdAt', '<', cutoffTs)
-      .limit(500) // batch limit
-      .get();
-
-    if (oldSnap.empty) {
-      console.log('[cleanup] No old analyses found.');
-      return { deleted: 0 };
-    }
-
+    const oldSnap = await db.collection('analisis').where('createdAt', '<', cutoffTs).limit(500).get();
+    if (oldSnap.empty) { console.log('[cleanup] Nothing to delete.'); return { deleted: 0 }; }
     let deleted = 0;
     const batch = db.batch();
-
     oldSnap.docs.forEach(doc => {
-      const userId = doc.data().userId;
-      // Only delete if user is NOT pro
-      if (!proUids.has(userId)) {
-        batch.delete(doc.ref);
-        deleted++;
-      }
+      if (!proUids.has(doc.data().userId)) { batch.delete(doc.ref); deleted++; }
     });
-
-    if (deleted > 0) {
-      await batch.commit();
-      console.log(`[cleanup] Deleted ${deleted} old analyses from free users.`);
-    }
-
+    if (deleted > 0) { await batch.commit(); console.log(`[cleanup] Deleted ${deleted} analyses.`); }
     return { deleted };
   } catch (err) {
     console.error('[cleanup] Error:', err.message);
@@ -141,18 +124,8 @@ async function cleanupFreeUserHistory() {
   }
 }
 
-// ── AUTO-CLEANUP SCHEDULER: runs every 24 hours ──
-const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-setInterval(() => {
-  console.log('[cleanup] Scheduled cleanup triggered');
-  cleanupFreeUserHistory();
-}, CLEANUP_INTERVAL_MS);
-
-// Run once on startup (after 5 min delay to let server settle)
-setTimeout(() => {
-  console.log('[cleanup] Initial cleanup on startup');
-  cleanupFreeUserHistory();
-}, 5 * 60 * 1000);
+setInterval(() => { cleanupFreeUserHistory(); }, 24 * 60 * 60 * 1000);
+setTimeout(() => { cleanupFreeUserHistory(); }, 5 * 60 * 1000);
 
 // ── TEST ──
 app.get('/', (req, res) => res.json({ status: 'ok', message: 'The Mentor Backend 🔥' }));
@@ -260,58 +233,33 @@ app.post('/transcribe', verifyToken, async (req, res) => {
 });
 
 // ── YOUTUBE HELPERS ──
-
-// STRATEGY 1: Free captions via timedtext
 async function getFreeCaptions(videoId) {
   const langs = ['en', 'es', 'en-US', 'en-GB'];
   for (const lang of langs) {
     try {
       const url = `https://www.youtube.com/api/timedtext?lang=${lang}&v=${videoId}&fmt=json3`;
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-      });
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
       if (!res.ok) continue;
       const data = await res.json();
       if (!data.events || data.events.length === 0) continue;
-      const text = data.events
-        .filter(e => e.segs)
-        .map(e => e.segs.map(s => s.utf8 || '').join(''))
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (text.length > 100) {
-        console.log(`Free captions OK (${lang}): ${text.length} chars`);
-        return text;
-      }
-    } catch (e) {
-      console.log(`timedtext ${lang} failed:`, e.message);
-    }
+      const text = data.events.filter(e => e.segs).map(e => e.segs.map(s => s.utf8 || '').join('')).join(' ').replace(/\s+/g, ' ').trim();
+      if (text.length > 100) { console.log(`Free captions OK (${lang}): ${text.length} chars`); return text; }
+    } catch (e) { console.log(`timedtext ${lang} failed:`, e.message); }
   }
   try {
     const url = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&kind=asr&fmt=json3`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
     if (res.ok) {
       const data = await res.json();
       if (data.events && data.events.length > 0) {
-        const text = data.events
-          .filter(e => e.segs)
-          .map(e => e.segs.map(s => s.utf8 || '').join(''))
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (text.length > 100) {
-          console.log(`Free auto-captions OK: ${text.length} chars`);
-          return text;
-        }
+        const text = data.events.filter(e => e.segs).map(e => e.segs.map(s => s.utf8 || '').join('')).join(' ').replace(/\s+/g, ' ').trim();
+        if (text.length > 100) { console.log(`Free auto-captions OK: ${text.length} chars`); return text; }
       }
     }
   } catch (e) {}
   throw new Error('No free captions available');
 }
 
-// STRATEGY 2: Supadata (paid fallback)
 async function getSupadataTranscript(videoId) {
   if (!SUPADATA_API_KEY) throw new Error('Supadata API key not configured');
   console.log('Using Supadata for:', videoId);
@@ -330,7 +278,6 @@ async function getSupadataTranscript(videoId) {
   return text;
 }
 
-// ── YOUTUBE TRANSCRIPT ENDPOINT ──
 const ytCache = new Map();
 
 app.post('/youtube', verifyToken, async (req, res) => {
@@ -339,16 +286,9 @@ app.post('/youtube', verifyToken, async (req, res) => {
   const match = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   if (!match) return res.status(400).json({ message: 'Invalid YouTube URL' });
   const videoId = match[1];
-
-  if (ytCache.has(videoId)) {
-    console.log('Cache hit:', videoId);
-    return res.json(ytCache.get(videoId));
-  }
-
+  if (ytCache.has(videoId)) { console.log('Cache hit:', videoId); return res.json(ytCache.get(videoId)); }
   console.log('Processing YouTube video:', videoId);
-  let transcript = '';
-  let source = '';
-
+  let transcript = '', source = '';
   try {
     transcript = await getFreeCaptions(videoId);
     source = 'captions';
@@ -362,18 +302,14 @@ app.post('/youtube', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Could not get transcript. The video may not have captions or may be restricted.' });
     }
   }
-
   const cleaned = transcript.replace(/\[.*?\]/g, '').replace(/\s+/g, ' ').trim();
   if (cleaned.length < 50) return res.status(404).json({ message: 'Transcript too short or empty.' });
-
   const finalText = cleaned.length > 15000 ? cleaned.substring(0, 15000) + '... [truncated]' : cleaned;
-
   let title = '';
   try {
     const oRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
     if (oRes.ok) { const o = await oRes.json(); title = o.title || ''; }
   } catch (e) {}
-
   const result = { transcript: finalText, title, videoId, source };
   ytCache.set(videoId, result);
   console.log(`Done [${source}]: ${finalText.length} chars, title: "${title}"`);
