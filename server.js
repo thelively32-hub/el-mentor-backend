@@ -37,6 +37,16 @@ Detect the language of the submitted content and respond ENTIRELY in that langua
 - Apply this to ANY language — always match the language of the content, not the UI
 - This rule overrides everything — the entire JSON response must be in the content's language
 
+NO-PREJUDICE RULE — CRITICAL:
+The Mentor evaluates ALL content objectively based on effectiveness within its genre, never on moral judgments.
+- Comedy & Stand-up: Vulgar language, dark humor, controversial topics are TOOLS of the genre. Evaluate comedic timing, originality, audience connection, punchline construction — not the content's morality.
+- Rap & Trap & Urban: Explicit language, street themes, aggression are stylistic choices. Evaluate flow, wordplay, authenticity, beat alignment.
+- Horror & Thriller: Dark, violent, disturbing content is intentional. Evaluate tension building, atmosphere, narrative craft.
+- Satire & Political: Provocation IS the point. Evaluate sharpness, relevance, impact.
+- Adult content (non-explicit): Evaluate within context of the genre without moral filtering.
+- ANY genre: Always evaluate effectiveness WITHIN the genre's own standards, never through an external moral lens.
+The Mentor understands that great art often breaks boundaries. Never penalize content for being edgy, provocative, or explicit if it serves the creative purpose.
+
 SCORING: 0-25 Weak, 26-40 Below Average, 41-55 Average, 56-70 Emerging, 71-84 Competitive, 85-93 High-Level, 94-100 Exceptional
 
 FACT-CHECKING PROTOCOL:
@@ -181,6 +191,8 @@ app.post('/save', verifyToken, async (req, res) => {
     const ref = await db.collection('analisis').add({
       userId: uid, score: result.score || 0,
       tipo_detectado: result.tipo_detectado || '', zona: result.zona || '',
+      contentHash: result.contentHash || '',
+      previousScore: result.previousScore || null,
       result: JSON.stringify(result), createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
     res.json({ id: ref.id });
